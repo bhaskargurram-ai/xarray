@@ -5,7 +5,10 @@ import unicodedata
 import numpy as np
 
 from xarray import coding
+from xarray.core import duck_array_ops
 from xarray.core.variable import Variable
+from xarray.namedarray.parallelcompat import get_chunked_array_type
+from xarray.namedarray.pycompat import is_chunked_array
 
 # Special characters that are permitted in netCDF names except in the
 # 0th position of the string
@@ -59,6 +62,13 @@ COERCION_VALUE_ERROR = (
 )
 
 
+def _cast_nc3_dtype(arr, dtype, new_dtype):
+    cast_arr = arr.astype(new_dtype)
+    if not (cast_arr == arr).all():
+        raise ValueError(COERCION_VALUE_ERROR.format(dtype=dtype, new_dtype=new_dtype))
+    return cast_arr
+
+
 def coerce_nc3_dtype(arr):
     """Coerce an array to a data type that can be stored in a netCDF-3 file
 
@@ -72,18 +82,19 @@ def coerce_nc3_dtype(arr):
         bool   -> int8
 
     Data is checked for equality, or equivalence (non-NaN values) using the
-    ``(cast_array == original_array).all()``.
+    ``(cast_array == original_array).all()``. Chunked arrays are cast lazily,
+    and each chunk is checked when it is computed.
     """
     dtype = str(arr.dtype)
     if dtype in _nc3_dtype_coercions:
         new_dtype = _nc3_dtype_coercions[dtype]
         # TODO: raise a warning whenever casting the data-type instead?
-        cast_arr = arr.astype(new_dtype)
-        if not (cast_arr == arr).all():
-            raise ValueError(
-                COERCION_VALUE_ERROR.format(dtype=dtype, new_dtype=new_dtype)
+        if is_chunked_array(arr):
+            chunkmanager = get_chunked_array_type(arr)
+            return chunkmanager.map_blocks(
+                _cast_nc3_dtype, arr, dtype, new_dtype, dtype=np.dtype(new_dtype)
             )
-        arr = cast_arr
+        arr = _cast_nc3_dtype(arr, dtype, new_dtype)
     return arr
 
 
@@ -109,12 +120,20 @@ def _maybe_prepare_times(var):
     # this keeps backwards compatibility
 
     data = var.data
-    if data.dtype.kind in "iu":
+    # only int64 data can hold np.iinfo(np.int64).min
+    if data.dtype == np.int64:
         units = var.attrs.get("units", None)
         if units is not None and coding.variables._is_time_like(units):
+            fill_value = var.attrs.get("_FillValue", np.nan)
             mask = data == np.iinfo(np.int64).min
-            if mask.any():
-                data = np.where(mask, var.attrs.get("_FillValue", np.nan), data)
+            if is_chunked_array(data) and (
+                np.result_type(fill_value, data.dtype) == data.dtype
+            ):
+                # the fill value keeps the dtype, so there is no need to
+                # compute the data to find out whether it has any NaT
+                data = duck_array_ops.where(mask, fill_value, data)
+            elif mask.any():
+                data = np.where(mask, fill_value, data)
     return data
 
 

@@ -127,6 +127,11 @@ Deprecations
 
 Bug Fixes
 ~~~~~~~~~
+- Writing chunked integer variables to netCDF-3 or ``NETCDF4_CLASSIC`` files no
+  longer computes them while encoding, so ``compute=False`` stays lazy. The
+  check that the coercion to a netCDF-3 integer type is safe now runs on each
+  chunk as it is written (:issue:`10826`).
+  By `Bhaskar Gurram <https://github.com/bhaskargurram-ai>`_.
 - :py:func:`concat` and :py:meth:`Dataset.to_dataarray` now promote input dtypes
   before broadcasting missing dimensions, avoiding large intermediate
   allocations when combining Dask arrays with different dtypes (:issue:`10928`,

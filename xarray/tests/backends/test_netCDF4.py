@@ -11,6 +11,7 @@ import pytest
 
 import xarray as xr
 from xarray import DataArray, Dataset, backends, open_dataset, open_mfdataset
+from xarray.backends.netcdf3 import coerce_nc3_dtype
 from xarray.backends.netCDF4_ import (
     NetCDF4BackendEntrypoint,
     _extract_nc4_variable_encoding,
@@ -21,6 +22,7 @@ from xarray.tests import (
     assert_identical,
     dask_array_api,
     has_netCDF4,
+    raise_if_dask_computes,
     requires_cftime,
     requires_dask,
     requires_h5netcdf,
@@ -472,6 +474,57 @@ class TestNetCDF4ClassicViaNetCDF4Data(NetCDF3Only, CFEncodedBase):
         with h5netcdf.File(store_path, "r") as ds:
             # Check that the attribute is stored as a char array
             assert ds._h5file.attrs["foo"].dtype == np.dtype("S3")
+
+    @requires_dask
+    @pytest.mark.parametrize(
+        "dtype, attrs",
+        [
+            ("int64", {}),
+            ("uint16", {}),
+            ("int32", {"units": "days"}),
+            ("int64", {"units": "days", "_FillValue": -1}),
+        ],
+    )
+    def test_dtype_coercion_is_lazy(self, tmp_path, dtype, attrs) -> None:
+        # GH10826
+        x = np.arange(4, dtype=dtype)
+        original = Dataset({"x": ("t", x, attrs)}).chunk(t=2)
+        path = tmp_path / "tmp.nc"
+        with raise_if_dask_computes():
+            delayed = original.to_netcdf(
+                path, engine=self.engine, format=self.file_format, compute=False
+            )
+        delayed.compute()
+        with open_dataset(path, decode_cf=False) as actual:
+            assert actual.x.dtype == coerce_nc3_dtype(x).dtype
+            assert_array_equal(actual.x, x)
+
+    @requires_dask
+    def test_dtype_coercion_error_is_lazy(self) -> None:
+        import dask.array as da
+
+        x = da.from_array(np.array([0, 1, 2, np.iinfo("int64").max]), chunks=2)
+        with raise_if_dask_computes():
+            coerced = coerce_nc3_dtype(x)
+        assert coerced.dtype == np.int32
+        with pytest.raises(ValueError, match="could not safely cast"):
+            coerced.compute()
+
+    @requires_dask
+    def test_time_like_nat_with_integer_fill_value_is_lazy(self, tmp_path) -> None:
+        nat = np.iinfo(np.int64).min
+        x = np.array([0, nat, 2, 3], dtype="int64")
+        attrs = {"units": "days", "_FillValue": -1}
+        original = Dataset({"x": ("t", x, attrs)}).chunk(t=2)
+        path = tmp_path / "tmp.nc"
+        with raise_if_dask_computes():
+            delayed = original.to_netcdf(
+                path, engine=self.engine, format=self.file_format, compute=False
+            )
+        delayed.compute()
+        with open_dataset(path, decode_cf=False) as actual:
+            assert actual.x.dtype == np.int32
+            assert_array_equal(actual.x, [0, -1, 2, 3])
 
 
 class TestEncodingInvalid:
